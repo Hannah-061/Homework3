@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- 票券 agent：不可 commit ---
+# 設定與機密（.env 內有 DISCORD_TOKEN）；範本 .env.example 可以 commit
+.env.*
+!.env.example
+
+# DATA_DIR：Excel 紀錄、照片、log。建議放在 repo 外，若放在 repo 內就靠這些規則擋住
+data/
+ticket-data/
+photos/
+*.xlsx
+*.xlsx.bak
+~$*.xlsx
+
+# claude -p 的暫存工作資料夾
+.work/
+
+# macOS
+.DS_Store
