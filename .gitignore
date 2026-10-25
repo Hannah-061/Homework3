@@ -237,3 +237,18 @@ photos/
 
 # macOS
 .DS_Store
+
+# --- 預設忽略所有圖片與 PDF（票券照片屬於私人資料）---
+# 唯一例外：tests/fixtures/synthetic/ 裡「合成的、假的」測試檔案
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.heic
+*.pdf
+*.xls
+*.xlsm
+logs/
+!tests/fixtures/synthetic/
+!tests/fixtures/synthetic/**

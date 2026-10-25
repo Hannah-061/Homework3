@@ -1,0 +1,34 @@
+[project]
+name = "ticket-agent"
+version = "0.1.0"
+description = "Discord 票券記錄 agent：辨識票券照片、記進 Excel、回覆上傳者"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.14.5",
+    "discord-py>=2.7.1",
+    "openpyxl>=3.1.5",
+    "pillow>=13.0.0",
+    "pymupdf>=2.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+ticket-agent = "ticket_agent.main:cli"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",  # PyMuPDF 內部用的 SWIG 套件，與我們無關
+    "ignore:.audioop. is deprecated:DeprecationWarning",  # discord.py 內部的語音功能，我們不用
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
