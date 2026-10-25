@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from synthetic import (
-    CHANNEL, NOW, FakeMessenger, ScriptedAnalyzer, ScriptedCorrect, Sleeper, analysis, jpeg_bytes, make_attachment,
+    CHANNEL, NOW, FakeMessenger, ScriptedAnalyzer, ScriptedCorrect, Sleeper, analysis, distinct_jpeg, jpeg_bytes, make_attachment,
     make_config, make_message,
 )
 from ticket_agent.analyzer import InvalidResult
@@ -24,7 +24,7 @@ from ticket_agent.models import STATUS_ACTIVE, STATUS_DELETED, STATUS_REMOVED
 
 async def upload(rw, app, msg_id="m1", author="100", name="小明", att_id=None, when=NOW):
     att_id = att_id or f"att-{msg_id}"
-    rw.messenger.downloads[att_id] = jpeg_bytes()
+    rw.messenger.downloads[att_id] = distinct_jpeg(att_id)
     await app.handle_message(make_message(msg_id, author_id=author, name=name, attachments=[make_attachment(att_id)], when=when))
     await app.drain()
 
@@ -81,7 +81,7 @@ async def test_multiple_photos_in_one_message_are_each_processed(rw):
     analyzer = ScriptedAnalyzer(analysis(name="甲", seat_or_type="1"), analysis(name="乙", seat_or_type="2"), analysis(name="丙", seat_or_type="3"))
     app = rw.build(analyzer)
     for n in range(3):
-        rw.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        rw.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
     await app.handle_message(make_message("m1", attachments=[make_attachment(f"a{n}") for n in range(3)]))
     await app.drain()
     assert [r.data.name for r in rw.store().all_records()] == ["甲", "乙", "丙"]
@@ -92,7 +92,7 @@ async def test_at_most_five_photos_per_message_are_processed(rw):
     analyzer = ScriptedAnalyzer(lambda _j: analysis(name=f"票{analyzer.calls}"))
     app = rw.build(analyzer)
     for n in range(7):
-        rw.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        rw.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
     await app.handle_message(make_message("m1", attachments=[make_attachment(f"a{n}") for n in range(7)]))
     await app.drain()
     assert analyzer.calls == 5 and len(rw.store().all_records()) == 5
@@ -121,7 +121,7 @@ async def test_queue_full_tells_the_user_instead_of_growing_forever(rw):
 
     app = rw.build(slow, max_queue=1)
     for n in range(3):
-        rw.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        rw.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
     await app.handle_message(make_message("m0", author_id="1", attachments=[make_attachment("a0")]))
     await asyncio.sleep(0.05)  # 第一張進入處理
     await app.handle_message(make_message("m1", author_id="2", attachments=[make_attachment("a1")]))  # 排隊中
@@ -146,7 +146,7 @@ async def test_only_one_photo_is_analysed_at_a_time_and_in_order(rw):
 
     app = rw.build(tracked)
     for n in range(6):
-        rw.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        rw.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
         await app.handle_message(make_message(f"m{n}", author_id=str(n), attachments=[make_attachment(f"a{n}")]))
     await app.drain()
     assert state["peak"] == 1
@@ -486,7 +486,7 @@ async def test_many_users_uploading_correcting_and_listing_at_once_loses_nothing
     per_user = 5
     for u in users:
         for k in range(per_user):
-            rw.messenger.downloads[f"a-{u}-{k}"] = jpeg_bytes()
+            rw.messenger.downloads[f"a-{u}-{k}"] = distinct_jpeg(f"a-{u}-{k}")
 
     async def user_flow(u):
         for k in range(per_user):

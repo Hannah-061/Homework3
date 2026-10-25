@@ -17,7 +17,7 @@ from openpyxl import load_workbook
 
 from conftest import FAKE_SCRIPT  # noqa: F401  (確認假 claude 劇本可用)
 from synthetic import (
-    FakeMessenger, NOW, ScriptedAnalyzer, Sleeper, analysis, jpeg_bytes, make_attachment, make_config, make_message,
+    FakeMessenger, NOW, ScriptedAnalyzer, Sleeper, analysis, distinct_jpeg, jpeg_bytes, make_attachment, make_config, make_message,
     not_ticket, png_bytes, GOOD,
 )
 from ticket_agent import excel_store
@@ -59,7 +59,7 @@ def world(tmp_path):
 
 
 async def upload(world, app, *, msg_id="m1", author="100", name="小明", att_id="a1", data=None, filename="ticket.jpg", when=NOW):
-    world.messenger.downloads[att_id] = jpeg_bytes() if data is None else data
+    world.messenger.downloads[att_id] = distinct_jpeg(att_id) if data is None else data
     message = make_message(msg_id, author_id=author, name=name, attachments=[make_attachment(att_id, filename=filename)], when=when)
     await app.handle_message(message)
     await app.drain()
@@ -91,7 +91,7 @@ async def test_new_ticket_is_recorded_photo_saved_and_status_message_edited_into
 async def test_processing_message_tells_how_many_are_ahead(world):
     app = world.build(ScriptedAnalyzer(analysis()))
     for n in range(3):
-        world.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        world.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
         await app.handle_message(make_message(f"m{n}", attachments=[make_attachment(f"a{n}")]))
     await app.drain()
     first_texts = [item["text"] for item in world.messenger.sent[:3]]

@@ -131,6 +131,11 @@ def format_ticket_reply(
     return "\n".join(lines)
 
 
+def format_already_recorded(record: TicketRecord, summary: Summary) -> str:
+    """完全相同的照片（同一位元組）先前已記錄過：沒有新增，也沒有重新辨識。"""
+    return f"這張照片先前已記錄過 #{record.serial}，沒有新增\n\n{format_totals(summary)}"
+
+
 def _record_line(record: TicketRecord) -> str:
     d = record.data
     parts = [safe(d.name or d.ticket_type or "（沒有名稱）", 40), safe(d.event_datetime, 16), _money(d)]

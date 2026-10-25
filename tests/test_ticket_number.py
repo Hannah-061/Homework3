@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from synthetic import GOOD, NOW, ScriptedAnalyzer, ScriptedCorrect, analysis, jpeg_bytes, make_attachment, make_message
+from synthetic import GOOD, NOW, ScriptedAnalyzer, ScriptedCorrect, analysis, distinct_jpeg, jpeg_bytes, make_attachment, make_message
 from ticket_agent import corrections, dedupe, excel_store, replies
 from ticket_agent.analyzer import parse_analysis
 from ticket_agent.corrections import Correction, CorrectionUnclear, parse_correction_result
@@ -205,7 +205,7 @@ async def test_duplicate_upload_keeps_the_original_ticket_number_end_to_end(rw):
     clear_other_number = analysis(ticket_number="OTHER-7777")
     app = rw.build(ScriptedAnalyzer(blurry, clear_without_number, clear_other_number))
     for n in range(3):
-        rw.messenger.downloads[f"a{n}"] = jpeg_bytes()
+        rw.messenger.downloads[f"a{n}"] = distinct_jpeg(f"a{n}")
         await app.handle_message(make_message(f"m{n}", attachments=[make_attachment(f"a{n}")], when=NOW.replace(second=10 * n)))
         await app.drain()
     (record,) = rw.store().all_records()

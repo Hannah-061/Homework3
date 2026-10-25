@@ -31,8 +31,10 @@ RECORD_SHEET = "紀錄"
 STATS_SHEET = "統計"
 RECORD_HEADERS = (
     "流水號", "記錄時間", "上傳者", "票券種類", "名稱", "日期時間", "地點", "座位或票種", "金額", "幣別",
-    "其他資訊", "照片存放位置", "狀態", "上傳者ID", "回覆訊息ID",
+    "其他資訊", "照片存放位置", "狀態", "上傳者ID", "回覆訊息ID", "照片SHA256",
 )
+# 加入「照片SHA256」之前的舊格式（前 15 欄）。符合它的檔案啟動時只會多補一個標題，見 _ensure_file
+LEGACY_RECORD_HEADERS = RECORD_HEADERS[:-1]
 STATS_HEADERS = ("上傳者ID", "上傳者", "當月筆數", "當月金額", "歷史筆數", "歷史金額", "最後更新")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 # 「其他資訊」不在裡面：票號收在那個欄位的最前面，一般更正不能整個取代它（見 ticket_number.py）
@@ -92,6 +94,7 @@ def _row_values(record: TicketRecord) -> list[object]:
         record.serial, record.recorded_at.strftime(TIME_FORMAT), record.uploader, d.ticket_type, d.name,
         d.event_datetime, d.location, d.seat_or_type, d.amount, d.currency, d.other_info,
         "\n".join(record.photo_paths), record.status, record.uploader_id, ",".join(record.reply_message_ids),
+        "\n".join(record.photo_sha256),
     ]
 
 
@@ -122,6 +125,7 @@ def _parse_row(values: tuple[object, ...]) -> TicketRecord | None:
         data=data, photo_paths=tuple(p for p in _text(values[11]).split("\n") if p),
         status=_text(values[12]) or STATUS_ACTIVE,
         reply_message_ids=tuple(i for i in _text(values[14]).split(",") if i),
+        photo_sha256=tuple(h for h in _text(values[15]).split("\n") if h),
     )
 
 
@@ -146,6 +150,15 @@ class TicketStore:
         """用照片位置找紀錄。每張照片的檔名都是唯一的，所以拿它當「這件事做過了沒」的識別，重試才不會重複寫入。"""
         return next((r for r in self.all_records() if photo_path in r.photo_paths), None)
 
+    def find_active_by_hash(self, uploader_id: str, photo_sha256: str) -> TicketRecord | None:
+        """同一位上傳者、狀態為「有效」、照片雜湊相同的紀錄（已刪除、已更正移除的不算）。空白雜湊（例如舊紀錄）絕不配對。"""
+        digest = photo_sha256.strip().lower()
+        if not digest:
+            return None
+        matches = [r for r in self.all_records()
+                   if r.uploader_id == uploader_id and r.status == STATUS_ACTIVE and digest in r.photo_sha256]
+        return max(matches, key=lambda r: r.serial) if matches else None
+
     def list_records(self, uploader_id: str, *, month: str | None = None, include_inactive: bool = False) -> list[TicketRecord]:
         """某位上傳者自己的紀錄，依流水號由小到大。month 是 'YYYY-MM'，None 代表全部。"""
         return [
@@ -165,7 +178,7 @@ class TicketStore:
 
     def add_record(
         self, *, uploader: str, uploader_id: str, data: TicketData, photo_path: str,
-        recorded_at: datetime | None = None, reply_message_id: str | None = None,
+        recorded_at: datetime | None = None, reply_message_id: str | None = None, photo_sha256: str = "",
     ) -> TicketRecord:
         wb = self._load()
         records = self._records_of(wb)
@@ -173,16 +186,18 @@ class TicketStore:
             serial=max((r.serial for r in records), default=0) + 1,
             recorded_at=recorded_at or self._clock(), uploader=uploader, uploader_id=uploader_id, data=data,
             photo_paths=(photo_path,), reply_message_ids=(reply_message_id,) if reply_message_id else (),
+            photo_sha256=(photo_sha256.lower(),) if photo_sha256 else (),
         )
         ws = wb[RECORD_SHEET]
         self._write_row(ws, ws.max_row + 1, record)
         self._finish(wb, records + [record])
         return record
 
-    def merge_into(self, serial: int, data: TicketData, photo_path: str) -> TicketRecord:
-        """重複上傳：用新資料補齊舊的那一筆，兩張照片都保留（新的在前）。"""
+    def merge_into(self, serial: int, data: TicketData, photo_path: str, photo_sha256: str = "") -> TicketRecord:
+        """重複上傳：用新資料補齊舊的那一筆，兩張照片都保留（新的在前）。新照片的雜湊也記下來，之後再傳它也認得。"""
         return self._change(serial, lambda r: replace(
             r, data=dedupe.merge_ticket_data(r.data, data), photo_paths=(photo_path, *r.photo_paths),
+            photo_sha256=(photo_sha256.lower(), *r.photo_sha256) if photo_sha256 else r.photo_sha256,
         ))
 
     def update_fields(self, serial: int, changes: Mapping[str, object]) -> TicketRecord:
@@ -267,10 +282,29 @@ class TicketStore:
             self._save(wb)
             return
         wb = self._load()
-        if tuple(c.value for c in wb[RECORD_SHEET][1][: len(RECORD_HEADERS)]) != RECORD_HEADERS:
+        legacy = self._is_legacy_record_sheet(wb[RECORD_SHEET])
+        if not legacy and tuple(c.value for c in wb[RECORD_SHEET][1][: len(RECORD_HEADERS)]) != RECORD_HEADERS:
             raise StoreError("Excel 檔「紀錄」工作表的標題列和預期的不一樣，為避免寫進別人的檔案，不啟動")
         if tuple(c.value for c in wb[STATS_SHEET][1][: len(STATS_HEADERS)]) != STATS_HEADERS:
             raise StoreError("Excel 檔「統計」工作表的標題列和預期的不一樣，為避免寫進別人的檔案，不啟動")
+        if legacy:
+            # 舊格式（沒有「照片SHA256」欄）：只補一個標題，舊紀錄的雜湊保持空白；走一般的備份與原子替換
+            write_cell(wb[RECORD_SHEET], 1, len(RECORD_HEADERS), RECORD_HEADERS[-1])
+            self._save(wb)
+
+    @staticmethod
+    def _is_legacy_record_sheet(ws: Worksheet) -> bool:
+        """前 15 欄標題完全符合舊格式，而且第 16 欄以後（標題與所有資料列）都是空的，才算可以安全遷移。
+        第 16 欄已經有東西（例如有人手動填過）就不是舊格式：交給後面的標題檢查拒絕，不覆蓋任何內容。"""
+        legacy_len = len(LEGACY_RECORD_HEADERS)
+        if tuple(c.value for c in ws[1][:legacy_len]) != LEGACY_RECORD_HEADERS:
+            return False
+        if any(c.value not in (None, "") for c in ws[1][legacy_len:]):
+            return False
+        return all(
+            value in (None, "")
+            for row in ws.iter_rows(min_row=2, min_col=legacy_len + 1, values_only=True) for value in row
+        )
 
     def _load(self) -> Workbook:
         try:

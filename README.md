@@ -69,7 +69,7 @@ uv run ticket-agent                      # 檢查設定 → 連上 Discord → �
 | 1 | Claude 的檔案範圍隔離 | `src/ticket_agent/claude_runner.py` | 第 118–191 行（約 74 行）✅ 已實作，有測試與真實 claude 驗證 |
 | 2 | 使用者輸入隔離 | `src/ticket_agent/claude_runner.py`（緊接防護 1） | 第 194–228 行（約 35 行）✅ 已實作，有測試與真實 claude 驗證 |
 | 3 | 檔名清洗 | `src/ticket_agent/photos.py` | 第 41–111 行（約 71 行）✅ 已實作並有測試 |
-| 4 | Excel 公式注入防護 | `src/ticket_agent/excel_store.py` | 第 55–86 行（約 32 行）✅ 已實作並有測試 |
+| 4 | Excel 公式注入防護 | `src/ticket_agent/excel_store.py` | 第 57–88 行（約 32 行）✅ 已實作並有測試 |
 
 **即時的實際位置與行數**：`uv run ticket-agent --guards`。這張表的行數會在每一段完成後更新。
 

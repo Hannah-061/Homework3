@@ -1,6 +1,6 @@
 """一張照片的完整處理流程，以及「排隊、一次處理一張」的工作者（docs/architecture.md 第 4、7 節）。
 
-流程：下載 → 檢查與前處理 → 辨識（有上限的重試）→ 分流：
+流程：下載 → 檢查與前處理 → 照片雜湊提早比對（相同照片已記錄過就直接回覆）→ 辨識（有上限的重試）→ 分流：
 - 不是票券：存照片、回覆，不寫 Excel。
 - 是票券：存照片 → 判斷是否重複 → 寫 Excel（新增，或補齊舊的一筆）→ 回覆。
 - 失敗：存照片（檔名標「處理失敗」）、不寫 Excel、回覆「處理失敗」。
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -98,6 +99,10 @@ class PhotoPipeline:
             await self._finish(job, replies.format_unsupported_attachment(self._settings.max_attachment_bytes // (1024 * 1024)))
             return
 
+        photo_sha256 = hashlib.sha256(raw).hexdigest()  # 雜湊的是下載回來的原始位元組，不是轉過的 JPEG
+        if await self._answer_if_already_recorded(job, photo_sha256):
+            return
+
         try:
             analysis = await with_retries(
                 lambda: self._analyze(self._runner, jpeg),
@@ -115,9 +120,49 @@ class PhotoPipeline:
             await self._save_photo(job, jpeg, f"非票券-{analysis.not_ticket_description}")
             await self._finish(job, replies.format_not_ticket(analysis.not_ticket_description))
             return
-        await self._record_ticket(job, jpeg, analysis)
+        await self._record_ticket(job, jpeg, analysis, photo_sha256)
 
-    async def _record_ticket(self, job: PhotoJob, jpeg: bytes, analysis: AnalysisResult) -> None:
+    async def _answer_if_already_recorded(self, job: PhotoJob, photo_sha256: str) -> bool:
+        """辨識之前的提早攔截：同一位上傳者、狀態「有效」的紀錄已經有這張照片，就直接回覆，不呼叫 Claude、不存照片。
+        這只是為了省額度；真正的檢查在 _record_ticket 的寫入鎖內（兩者缺一不可：這裡漏掉也不會多一筆）。"""
+        uploader_id = job.message.author_id
+
+        def lookup(store: TicketStore):
+            record = store.find_active_by_hash(uploader_id, photo_sha256)
+            if record is None:
+                return None
+            if job.status_message_id and job.status_message_id not in record.reply_message_ids:
+                record = store.add_reply_message_id(record.serial, job.status_message_id)  # 回覆這則也能繼續更正
+            return record, store.summary(uploader_id)
+
+        try:
+            found = await self._gateway.run_with_retries(lookup)
+        except StoreError:
+            return False  # 讀不到就照一般流程走，寫入時還會再檢查一次
+        if found is None:
+            return False
+        await self._reply_already_recorded(job, *found)
+        return True
+
+    async def _reply_already_recorded(self, job: PhotoJob, record, summary) -> None:
+        final_id = await self._finish(job, replies.format_already_recorded(record, summary))
+        if final_id and final_id != job.status_message_id:  # 編輯失敗、改發新回覆：也讓使用者回覆這一則能更正
+            try:
+                await self._gateway.run_with_retries(lambda store: store.add_reply_message_id(record.serial, final_id))
+            except StoreError:
+                log.warning("無法記錄回覆訊息編號")
+
+    def _discard_new_photo(self, saved: Path) -> None:
+        """寫入階段才發現重複時，只清掉「這次工作剛存的」那一張。刪除前確認：就在 photos 目錄正下方、是一般檔案、不是符號連結。"""
+        try:
+            if saved.parent.resolve() == self._photos_dir.resolve() and saved.is_file() and not saved.is_symlink():
+                saved.unlink()
+            else:
+                log.warning("不清理重複的照片：位置不在預期的資料夾內")
+        except OSError as error:
+            log.warning("清理重複的照片失敗：%s", type(error).__name__)
+
+    async def _record_ticket(self, job: PhotoJob, jpeg: bytes, analysis: AnalysisResult, photo_sha256: str) -> None:
         data = analysis.to_ticket_data()
         saved = await self._save_photo(job, jpeg, data.name or data.ticket_type or "票券")
         if saved is None:
@@ -129,25 +174,34 @@ class PhotoPipeline:
 
         def write(store: TicketStore):
             """可以安全地重做：先用照片位置確認上一次是不是其實已經寫進去了。"""
-            existing = store.find_by_photo_path(photo_rel)
+            same_photo = False
+            existing = store.find_by_photo_path(photo_rel)  # 1. 重試冪等：這次的照片位置已經寫過了，不能把自己誤判成重複
             if existing is not None:
                 record, updated = existing, len(existing.photo_paths) > 1
+            elif (earlier := store.find_active_by_hash(message.author_id, photo_sha256)) is not None:
+                record, updated, same_photo = earlier, False, True  # 2. 完全相同的照片：不新增、不合併
             else:
-                duplicate = store.find_duplicate(message.author_id, data)
+                duplicate = store.find_duplicate(message.author_id, data)  # 3. 原有的欄位啟發式比對
                 if duplicate is not None:
-                    record, updated = store.merge_into(duplicate.serial, data, photo_rel), True
+                    record, updated = store.merge_into(duplicate.serial, data, photo_rel, photo_sha256), True
                 else:
                     record, updated = store.add_record(
                         uploader=uploader, uploader_id=message.author_id, data=data, photo_path=photo_rel,
-                        recorded_at=message.created_at, reply_message_id=job.status_message_id), False
+                        recorded_at=message.created_at, reply_message_id=job.status_message_id,
+                        photo_sha256=photo_sha256), False
             if job.status_message_id and job.status_message_id not in record.reply_message_ids:
                 record = store.add_reply_message_id(record.serial, job.status_message_id)
-            return record, updated, store.summary(message.author_id)
+            return record, updated, store.summary(message.author_id), same_photo
 
         try:
-            record, updated, summary = await self._gateway.run_with_retries(write)
+            record, updated, summary, same_photo = await self._gateway.run_with_retries(write)
         except StoreError:
             await self._finish(job, replies.format_failure())  # 照片已經存起來了，只是沒寫進 Excel
+            return
+
+        if same_photo:  # 提早比對漏掉、到寫入鎖內才發現重複：回覆「已記錄過」，並清掉這次剛存的照片
+            self._discard_new_photo(saved)
+            await self._reply_already_recorded(job, record, summary)
             return
 
         text = replies.format_ticket_reply(

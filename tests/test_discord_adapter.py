@@ -22,7 +22,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from synthetic import (
-    CHANNEL, FAKE_TOKEN, FakeClock, ScriptedAnalyzer, ScriptedCorrect, Sleeper, analysis, jpeg_bytes, make_config,
+    CHANNEL, FAKE_TOKEN, FakeClock, ScriptedAnalyzer, ScriptedCorrect, Sleeper, analysis, distinct_jpeg, jpeg_bytes, make_config,
 )
 from ticket_agent import discord_adapter, main as main_module
 from ticket_agent.app import build_app
@@ -584,7 +584,7 @@ async def stack(tmp_path):
 
             async def fake_fetch(session, url, limit):
                 fetch_urls.append(url)
-                item = self.downloads.get(url, jpeg_bytes())
+                item = self.downloads.get(url, distinct_jpeg(str(len(fetch_urls))))  # 每次下載一張不同的圖（相同位元組會被當成重複上傳）
                 if isinstance(item, BaseException):
                     raise item
                 return item

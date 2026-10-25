@@ -52,6 +52,11 @@ def jpeg_bytes(lines=("TEST CONCERT 2099 (SYNTHETIC)", "Seat A12  TWD 1200"), si
     return buffer.getvalue()
 
 
+def distinct_jpeg(key: str) -> bytes:
+    """每個 key 一張位元組不同的合成票券圖（key 要短：太長會畫出圖片邊界被裁掉，不同的 key 就會變成同一張圖）。要模擬「不同的照片」時用它（相同位元組的照片會被當成重複上傳）。"""
+    return jpeg_bytes(lines=("TEST CONCERT 2099 (SYNTHETIC)", "Seat A12  TWD 1200", f"VARIANT {key}"))
+
+
 def png_bytes(size=(600, 300), alpha=False) -> bytes:
     buffer = io.BytesIO()
     image = _draw_ticket(["PNG TEST TICKET"], size)

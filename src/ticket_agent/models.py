@@ -36,3 +36,4 @@ class TicketRecord:
     photo_paths: tuple[str, ...] = ()  # 相對於 DATA_DIR；重複上傳時新的在前
     status: str = STATUS_ACTIVE
     reply_message_ids: tuple[str, ...] = ()
+    photo_sha256: tuple[str, ...] = ()  # 這一筆對應的照片雜湊（原始位元組的 SHA-256）；補齊過的紀錄有多個，新的在前。舊紀錄是空的
