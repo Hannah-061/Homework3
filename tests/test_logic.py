@@ -405,3 +405,113 @@ def test_the_help_text_agrees_with_the_real_defaults():
     text = replies.format_help(max_mb=settings.max_attachment_bytes // (1024 * 1024), max_attachments=settings.max_attachments_per_message,
                                confirm_timeout_s=settings.confirm_timeout_s, rate_limit_per_min=OPTIONAL_INT_KEYS["RATE_LIMIT_PER_MIN"][0])
     assert "10 MB" in text and "5 張" in text and "60 秒" in text and "每分鐘最多 8 次" in text
+
+
+# ================================================================== 指令名稱與參數緊貼（驚嘆號後的空白、#1 黏在指令後面）
+
+@pytest.mark.parametrize("text,expected", [
+    # 新支援：參數緊貼在指令名稱後面（用 # 或數字開頭）
+    ("!刪除#1", DeleteCommand(1)),
+    ("!刪除1", DeleteCommand(1)),
+    ("! 刪除#1", DeleteCommand(1)),              # 回饋的那個例子
+    ("!  刪除#12", DeleteCommand(12)),
+    ("！刪除＃１", DeleteCommand(1)),              # 全形驚嘆號、全形 #、全形數字
+    ("!我的票券2026-09", ListCommand("2026-09")),
+    ("! 我的票券2026-09", ListCommand("2026-09")),
+    # 原本就支援的寫法，結果完全不變
+    ("! 刪除 #1", DeleteCommand(1)),
+    ("!刪除 #1", DeleteCommand(1)),
+    ("!刪除 1", DeleteCommand(1)),
+    ("!  刪除 1", DeleteCommand(1)),
+    ("! 說明", HelpCommand()),
+    ("!說明", HelpCommand()),
+    ("! 我的票券", ListCommand("month")),
+    ("!我的票券", ListCommand("month")),
+    ("! 我的票券 全部", ListCommand("all")),
+    ("!我的票券 2026-09", ListCommand("2026-09")),
+])
+def test_arguments_may_be_attached_to_the_command_word(text, expected):
+    assert parse_command(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "!說明書", "!刪除了", "!刪掉 1", "!play 歌", "請問 !說明",           # 要求維持忽略的案例
+    "!說明1", "!說明#1", "!說 明", "!刪 除 1", "!help", "!!刪除1", "!!說明", "請問!刪除#1", "/刪除#1", "刪除#1",
+    "!刪除abc", "!刪除了1", "!我的票券全部", "!我的票券書", "!我的票卷", "!我的票券abc", "! play",
+    "!", "! ", "!!", "！", "!#1", "!1",
+])
+def test_things_that_are_not_our_commands_are_still_ignored(text):
+    assert parse_command(text) is None
+
+
+@pytest.mark.parametrize("text,usage", [
+    ("!刪除#", commands.DELETE_USAGE),
+    ("!刪除#abc", commands.DELETE_USAGE),
+    ("!刪除0", commands.DELETE_USAGE),
+    ("!刪除#0", commands.DELETE_USAGE),
+    ("!刪除1 2", commands.DELETE_USAGE),
+    ("!刪除#1 2", commands.DELETE_USAGE),
+    ("!刪除1234567890", commands.DELETE_USAGE),
+    ("!我的票券2026-13", commands.LIST_USAGE),
+    ("!我的票券2026-9", commands.LIST_USAGE),
+    ("!說明 abc", commands.HELP_USAGE),
+])
+def test_attached_but_invalid_arguments_get_the_usage_hint(text, usage):
+    assert parse_command(text) == BadCommand(usage)
+
+
+def test_attached_arguments_cannot_smuggle_anything_else_through():
+    for hostile in ("!刪除#1;rm -rf ~", "!刪除1$(id)", "!刪除#1\n!刪除#2", "!我的票券2026-09;ls", "!刪除#１２３４５６７８９０"):
+        parsed = parse_command(hostile)
+        assert parsed is None or isinstance(parsed, BadCommand) or (isinstance(parsed, DeleteCommand) and parsed.serial >= 1)
+    assert parse_command("!刪除#1;rm -rf ~") == BadCommand(commands.DELETE_USAGE)
+    assert parse_command("!刪除#1\n!刪除#2") == BadCommand(commands.DELETE_USAGE)  # 兩個指令黏在一起：不挑一個執行
+
+
+def test_every_command_word_is_still_recognized_with_normal_spacing():
+    for word in COMMAND_WORDS:
+        for text in (f"!{word}", f"! {word}", f"！{word}", f"!  {word}  "):
+            assert parse_command(text) is not None, text
+
+
+# ================================================================== 刪除確認的兩種方式：提示文字與文件
+
+from pathlib import Path as _Path  # noqa: E402
+
+_REPO = _Path(__file__).resolve().parents[1]
+
+
+def test_the_delete_confirmation_message_offers_both_ways_and_uses_the_real_timeout():
+    text = replies.format_delete_confirm(record(7), timeout_s=90)
+    assert "#7" in text and "90 秒內" in text and "60 秒" not in text
+    assert "回覆這則訊息並輸入「確定」" in text                    # 方式一：回覆確認訊息
+    assert "直接在這個頻道傳送「確定」" in text                    # 方式二：直接傳
+    assert "SECRET" not in text and "票號" not in text            # 仍然不含票號
+
+
+def test_the_delete_confirmation_message_uses_sixty_seconds_by_default():
+    assert "60 秒內" in replies.format_delete_confirm(record(1))
+
+
+def test_help_explains_both_ways_to_confirm_a_delete_and_how_to_pick_when_several_are_pending():
+    text = help_text(confirm_timeout_s=90)
+    section = text.split("【刪除】")[1].split("【其他】")[0]
+    assert "90 秒內" in section and "60 秒" not in section
+    assert "回覆」功能回覆我的確認訊息並輸入「確定」" in section
+    assert "直接在這個頻道傳送「確定」" in section
+    assert "好幾筆" in section and "回覆" in section             # 有好幾筆等待確認時要用回覆來指定
+    assert "標記為「已刪除」" in section and "不會刪除 Excel 的資料列" in section and "不會刪除本機的照片" in section  # 原本的警告仍在
+
+
+def test_the_ambiguity_message_tells_the_user_to_reply_to_the_one_they_mean():
+    text = replies.format_confirm_ambiguous()
+    assert "多筆" in text and "回覆" in text and "確定" in text
+
+
+def test_readme_and_architecture_document_the_two_confirmation_ways_and_the_rules():
+    readme = (_REPO / "README.md").read_text(encoding="utf-8")
+    architecture = (_REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    for needle in ("直接在同一個頻道傳送「確定」", "兩筆以上", "!刪除#12", "已刪除"):
+        assert needle in readme, f"README 缺少：{needle}"
+    for needle in ("緊貼", "直接在頻道傳送「確定」", "同一個使用者、同一個頻道", "多筆", "不計入限流", "超過 60 秒才算逾時"):
+        assert needle in architecture, f"architecture.md 缺少：{needle}"

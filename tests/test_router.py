@@ -656,3 +656,262 @@ async def test_help_reflects_changed_settings(rw):
     await say(app, "h1", "!說明")
     text = rw.texts()[-1]
     assert "20 MB" in text and "每分鐘最多 3 次" in text and "10 MB" not in text and "8 次" not in text
+
+
+# ================================================================== 指令名稱與參數緊貼（整合）
+
+async def test_a_delete_command_with_the_number_attached_works_end_to_end(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await say(app, "d1", "! 刪除#1")                      # 回饋的那個例子
+    confirm_id = rw.messenger.sent[-1]["id"]
+    assert "確定要刪除 #1" in rw.messenger.text_of(confirm_id)
+    assert rw.store().get(1).status == STATUS_ACTIVE      # 還沒確認，不能刪
+    await say(app, "d2", "確定", reference=confirm_id)
+    assert rw.store().get(1).status == STATUS_DELETED
+
+
+async def test_attached_variants_of_the_other_commands_work_and_unrelated_text_is_still_ignored(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await say(app, "l1", "!我的票券2026-10")
+    assert "你的票券（2026-10）" in rw.texts()[-1]
+    count = len(rw.messenger.sent)
+    for n, text in enumerate(("!刪除了", "!說明書", "!刪掉 1", "!play 歌", "請問 !說明", "!刪除abc")):
+        await say(app, f"x{n}", text)
+    assert len(rw.messenger.sent) == count                # 這些都維持忽略，bot 完全沒有反應
+    assert rw.store().get(1).status == STATUS_ACTIVE
+
+
+async def test_attached_commands_share_the_same_rate_limit_and_ownership_checks(rw):
+    app = rw.build()
+    await upload(rw, app, author="100")
+    await say(app, "o1", "!刪除#1", author="200")          # 別人的編號：一樣回「找不到這一筆」
+    assert rw.texts()[-1] == "找不到這一筆" and rw.store().get(1).status == STATUS_ACTIVE
+    for n in range(9):  # 每分鐘 8 次：第 9 次被擋
+        await say(app, f"r{n}", "!刪除#99", author="300")  # 緊貼寫法也要過限流
+    assert rw.texts().count("找不到這一筆") == 1 + 8      # 前面別人那次 + 這個人的 8 次
+    assert rw.texts().count("傳太快了，請稍後再試") == 1 and rw.texts()[-1] == "傳太快了，請稍後再試"
+
+
+# ================================================================== 直接傳送「確定」完成刪除確認
+
+from dataclasses import replace as _dc_replace  # noqa: E402
+
+
+async def request_delete(app, rw, serial, *, msg_id, author="100"):
+    """送出 !刪除，回傳 bot 的確認訊息編號。"""
+    await say(app, msg_id, f"!刪除 {serial}", author=author)
+    return rw.messenger.sent[-1]["id"]
+
+
+def state(rw, serial=1):
+    return rw.store().get(serial).status
+
+
+async def test_replying_to_the_confirmation_message_still_works(rw):
+    app = rw.build()
+    await upload(rw, app)
+    confirm_id = await request_delete(app, rw, 1, msg_id="d1")
+    await say(app, "d2", "確定", reference=confirm_id)
+    assert state(rw) == STATUS_DELETED and "已刪除 #1" in rw.texts()[-1]
+
+
+async def test_the_same_user_can_confirm_by_sending_the_word_directly_in_the_channel(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    assert state(rw) == STATUS_ACTIVE                       # 還沒確認
+    await say(app, "d2", "確定")                              # 沒有回覆任何訊息，直接傳
+    assert state(rw) == STATUS_DELETED
+    assert "已刪除 #1" in rw.texts()[-1] and "歷史：0 筆" in rw.texts()[-1]
+    assert len(list((rw.config.data_dir / "photos").iterdir())) == 1  # 照片保留，只標記狀態
+
+
+@pytest.mark.parametrize("text", ["確定", " 確定 ", "確定\n", "　確定　"])
+async def test_the_confirmation_word_may_have_surrounding_whitespace(rw, text):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    await say(app, "d2", text)
+    assert state(rw) == STATUS_DELETED
+
+
+async def test_another_user_cannot_confirm_by_sending_the_word(rw):
+    app = rw.build()
+    await upload(rw, app, author="100")
+    await request_delete(app, rw, 1, msg_id="d1", author="100")
+    await say(app, "x1", "確定", author="200")
+    assert state(rw) == STATUS_ACTIVE
+    await say(app, "d2", "確定", author="100")                # 本人的待確認沒有被別人弄壞，本人仍然可以確認
+    assert state(rw) == STATUS_DELETED
+
+
+async def test_the_word_sent_in_another_channel_cannot_confirm(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    count = len(rw.messenger.sent)
+    await app.handle_message(make_message("x1", content="確定", channel=CHANNEL + 1))
+    assert state(rw) == STATUS_ACTIVE and len(rw.messenger.sent) == count
+
+
+async def test_a_pending_delete_remembers_its_channel_and_only_that_channel_can_confirm(rw):
+    """即使訊息進得了核心，頻道和待確認的原始頻道不同，也不能確認（多一層保險）。"""
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    router = app.router
+    (key, pending), = router._pending_deletes.items()
+    assert pending.channel_id == CHANNEL
+    router._pending_deletes[key] = _dc_replace(pending, channel_id=CHANNEL + 99)  # 假裝這筆是在別的頻道提出的
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_ACTIVE
+    await say(app, "d3", "確定", reference=key)               # 回覆式確認也一樣要檢查頻道
+    assert state(rw) == STATUS_ACTIVE
+
+
+async def test_after_sixty_seconds_the_word_no_longer_deletes(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    rw.clock.now += 61
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_ACTIVE and "確認已逾時" in rw.texts()[-1]
+    await say(app, "d3", "確定")                              # 逾時的待確認已經清掉，再傳也不會刪
+    assert state(rw) == STATUS_ACTIVE
+
+
+async def test_exactly_at_the_deadline_it_still_works_and_one_second_later_it_does_not(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    rw.clock.now += 60                                        # 和回覆式確認同一個邊界：超過才算逾時
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_DELETED
+
+
+async def test_a_long_expired_request_is_ignored_silently_so_casual_chat_is_not_answered(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    rw.clock.now += 10_000
+    count = len(rw.messenger.sent)
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_ACTIVE and len(rw.messenger.sent) == count
+
+
+async def test_the_word_alone_never_deletes_anything_when_nothing_is_pending(rw):
+    app = rw.build()
+    await upload(rw, app)
+    count = len(rw.messenger.sent)
+    for n in range(5):
+        await say(app, f"x{n}", "確定")
+    assert state(rw) == STATUS_ACTIVE and len(rw.messenger.sent) == count  # 沒有任何反應，也沒有刪除
+
+
+@pytest.mark.parametrize("text", ["好", "確定刪除", "確定 1", "不確定", "確認", "ok", "yes", "是", "確定!", "確 定", "確定了", "確定。", "刪除", "!確定", "確定確定"])
+async def test_any_other_text_does_not_confirm(rw, text):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    await say(app, "d2", text)
+    assert state(rw) == STATUS_ACTIVE
+    await say(app, "d3", "確定")                              # 待確認沒有被這些文字破壞
+    assert state(rw) == STATUS_DELETED
+
+
+async def test_the_word_with_an_attachment_or_as_a_reply_to_something_else_does_not_confirm(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    rw.messenger.downloads["a"] = jpeg_bytes()
+    await say(app, "x1", "確定", attachments=[make_attachment("a")])
+    await say(app, "x2", "確定", reference="some-other-message")
+    await app.drain()
+    assert state(rw) == STATUS_ACTIVE
+
+
+async def test_deleting_someone_elses_ticket_is_still_refused_and_the_word_then_does_nothing(rw):
+    app = rw.build()
+    await upload(rw, app, author="100")
+    await say(app, "d1", "!刪除 1", author="200")
+    assert rw.texts()[-1] == "找不到這一筆"
+    await say(app, "d2", "確定", author="200")
+    await say(app, "d3", "確定", author="100")                # 本人也沒有待確認的刪除
+    assert state(rw) == STATUS_ACTIVE
+
+
+async def test_the_word_confirms_only_once(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    await say(app, "d2", "確定")
+    count = len(rw.messenger.sent)
+    await say(app, "d3", "確定")
+    assert len(rw.messenger.sent) == count and state(rw) == STATUS_DELETED
+
+
+async def test_the_same_event_delivered_twice_confirms_only_once(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    message = make_message("same", content="確定")
+    await app.handle_message(message)
+    count = len(rw.messenger.sent)
+    await app.handle_message(message)
+    assert len(rw.messenger.sent) == count
+
+
+async def test_ownership_and_state_are_rechecked_when_the_word_arrives(rw):
+    """待確認期間紀錄被改變了（例如已經被別的方式刪掉），確認時什麼都不做。"""
+    app = rw.build()
+    await upload(rw, app)
+    await request_delete(app, rw, 1, msg_id="d1")
+    rw.store().set_status(1, STATUS_REMOVED)
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_REMOVED and rw.texts()[-1] == "找不到這一筆"
+
+
+async def test_with_two_pending_requests_the_bare_word_is_ambiguous_and_deletes_nothing(rw):
+    app = rw.build(ScriptedAnalyzer(analysis(), analysis(name="第二張", seat_or_type="B2")))
+    await upload(rw, app, "m1", att_id="a1")
+    await upload(rw, app, "m2", att_id="a2")
+    first = await request_delete(app, rw, 1, msg_id="d1")
+    second = await request_delete(app, rw, 2, msg_id="d2")
+    await say(app, "d3", "確定")
+    assert state(rw, 1) == STATUS_ACTIVE and state(rw, 2) == STATUS_ACTIVE
+    assert "多筆" in rw.texts()[-1] and "回覆" in rw.texts()[-1]
+    await say(app, "d4", "確定", reference=second)             # 指名要確認哪一筆：只刪那一筆
+    assert state(rw, 2) == STATUS_DELETED and state(rw, 1) == STATUS_ACTIVE
+    await say(app, "d5", "確定")                              # 現在只剩一筆待確認，不再有歧義
+    assert state(rw, 1) == STATUS_DELETED
+    assert first != second
+
+
+async def test_two_users_each_confirm_only_their_own_pending_request(rw):
+    app = rw.build(ScriptedAnalyzer(analysis(), analysis(name="別人的票", seat_or_type="Z9")))
+    await upload(rw, app, "m1", author="100", att_id="a1")
+    await upload(rw, app, "m2", author="200", att_id="a2", name="小華")
+    await request_delete(app, rw, 1, msg_id="d1", author="100")
+    await request_delete(app, rw, 2, msg_id="d2", author="200")
+    await say(app, "d3", "確定", author="100")
+    assert state(rw, 1) == STATUS_DELETED and state(rw, 2) == STATUS_ACTIVE
+    await say(app, "d4", "確定", author="200")
+    assert state(rw, 2) == STATUS_DELETED
+
+
+async def test_bare_words_from_people_without_a_pending_request_do_not_use_up_the_rate_limit(rw):
+    app = rw.build()
+    for n in range(30):
+        await say(app, f"x{n}", "確定", author="300")
+    await say(app, "h1", "!說明", author="300")
+    assert rw.texts()[-1] != "傳太快了，請稍後再試" and "票券紀錄 Bot 說明" in rw.texts()[-1]
+
+
+async def test_the_new_command_parsing_still_works_together_with_direct_confirmation(rw):
+    app = rw.build()
+    await upload(rw, app)
+    await say(app, "d1", "! 刪除#1")                           # 上一階段新增的緊貼寫法
+    await say(app, "d2", "確定")
+    assert state(rw) == STATUS_DELETED

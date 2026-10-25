@@ -152,7 +152,7 @@ def format_user_list(records: Sequence[TicketRecord], summary: Summary, period_l
 
 def format_delete_confirm(record: TicketRecord, timeout_s: int = 60) -> str:
     name = safe(record.data.name or record.data.ticket_type or "（沒有名稱）", 40)
-    return f"確定要刪除 #{record.serial}「{name}」嗎？請在 {timeout_s} 秒內回覆這則訊息，輸入「確定」。"
+    return f"確定要刪除 #{record.serial}「{name}」嗎？請在 {timeout_s} 秒內回覆這則訊息並輸入「確定」，或直接在這個頻道傳送「確定」。"
 
 
 def format_deleted(record: TicketRecord, summary: Summary) -> str:
@@ -180,7 +180,10 @@ def format_help(*, max_mb: int, max_attachments: int, confirm_timeout_s: int, ra
         f"可以更正：{correctable}；也可以說「這不是票券」把這筆撤回。票號不能在 Discord 更正。",
         "",
         "【刪除】",
-        f"`!{DELETE_COMMAND} 編號`　例如 `!{DELETE_COMMAND} 12`。我會先請你確認，請在 {confirm_timeout_s} 秒內用「回覆」功能回覆我的確認訊息，輸入「確定」才會完成。",
+        f"`!{DELETE_COMMAND} 編號`　例如 `!{DELETE_COMMAND} 12`。我會先請你確認，請在 {confirm_timeout_s} 秒內完成，有兩種方式：",
+        "① 用「回覆」功能回覆我的確認訊息並輸入「確定」；",
+        "② 直接在這個頻道傳送「確定」（只有一筆等待確認時才可以）。",
+        "如果你同時有好幾筆等待確認的刪除，我不會猜是哪一筆，請用①回覆你要確認的那則訊息。",
         "⚠️ 刪除只會把這筆紀錄標記為「已刪除」（不再計入累計），不會刪除 Excel 的資料列，也不會刪除本機的照片。",
         "",
         "【其他】",
@@ -203,6 +206,10 @@ def format_no_change() -> str:
 
 def format_ticket_number_notice() -> str:
     return "ℹ️ 票號為了安全，不能在 Discord 更正；需要的話請直接編輯 Excel 檔。"
+
+
+def format_confirm_ambiguous() -> str:
+    return "你有多筆等待確認的刪除，沒辦法判斷是哪一筆。請回覆你要確認的那則確認訊息，並輸入「確定」。"
 
 
 def format_confirm_expired() -> str:

@@ -39,6 +39,7 @@ from .totals import month_key
 log = logging.getLogger(__name__)
 
 CONFIRM_WORDS = ("確定",)
+EXPIRED_NOTICE_GRACE_S = 300  # 剛逾時（5 分鐘內）的待確認，使用者直接傳「確定」時才回覆「已逾時」；更久以前的當作一般聊天，不回應
 SEEN_LIMIT = 2000
 PENDING_LIMIT = 200
 
@@ -64,6 +65,7 @@ class RouterSettings:
 class PendingDelete:
     serial: int
     user_id: str
+    channel_id: int  # 提出刪除的頻道：只有同一個使用者、在同一個頻道，才能確認
     expires_at: float
 
 
@@ -108,6 +110,8 @@ class MessageRouter:
                 await self._handle_command(message, command)
             elif message.attachments:
                 await self._handle_attachments(message)
+            elif not message.reference_message_id and self._is_confirm_word(message.content):
+                await self._handle_direct_confirmation(message)  # 沒有回覆任何訊息、直接傳「確定」
         except Exception as error:  # noqa: BLE001 - 一則訊息出錯不可以影響其他訊息
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -189,7 +193,9 @@ class MessageRouter:
             self._messenger, message, replies.format_delete_confirm(record, self._s.confirm_timeout_s))
         if confirm_id:
             self._purge_expired_confirmations()
-            self._pending_deletes[confirm_id] = PendingDelete(record.serial, uid, self._clock() + self._s.confirm_timeout_s)
+            self._pending_deletes[confirm_id] = PendingDelete(
+                serial=record.serial, user_id=uid, channel_id=message.channel_id,
+                expires_at=self._clock() + self._s.confirm_timeout_s)
             while len(self._pending_deletes) > PENDING_LIMIT:
                 self._pending_deletes.popitem(last=False)
 
@@ -208,15 +214,40 @@ class MessageRouter:
         return True
 
     async def _handle_delete_confirmation(self, message: IncomingMessage, pending: PendingDelete) -> bool:
-        if message.author_id != pending.user_id:
-            return True  # 別人回覆別人的確認訊息：無視
+        if message.author_id != pending.user_id or message.channel_id != pending.channel_id:
+            return True  # 別人、或別的頻道回覆這則確認訊息：無視
         if self._clock() > pending.expires_at:
             self._pending_deletes.pop(message.reference_message_id, None)
             await safe_reply(self._messenger, message, replies.format_confirm_expired())
             return True
-        if unicodedata.normalize("NFKC", message.content).strip() not in CONFIRM_WORDS:
+        if not self._is_confirm_word(message.content):
             return True  # 不是「確定」：維持等待，直到逾時
-        self._pending_deletes.pop(message.reference_message_id, None)
+        await self._confirm_delete(message, message.reference_message_id, pending)
+        return True
+
+    async def _handle_direct_confirmation(self, message: IncomingMessage) -> None:
+        """直接在頻道傳「確定」（沒有回覆任何訊息）。只有一種情況會刪除：這個使用者在這個頻道，
+        剛好有「一筆」還沒逾時的待確認刪除。沒有待確認、有好幾筆分不清楚、已經逾時，都不會刪。"""
+        now = self._clock()
+        mine = [(key, pending) for key, pending in self._pending_deletes.items()
+                if pending.user_id == message.author_id and pending.channel_id == message.channel_id]
+        valid = [(key, pending) for key, pending in mine if now <= pending.expires_at]  # 邊界和回覆式確認相同：超過才算逾時
+        if len(valid) == 1:
+            key, pending = valid[0]
+            await self._confirm_delete(message, key, pending)
+        elif len(valid) > 1:
+            await safe_reply(self._messenger, message, replies.format_confirm_ambiguous())
+        else:  # 沒有有效的待確認
+            recently_expired = any(now - pending.expires_at <= EXPIRED_NOTICE_GRACE_S for _, pending in mine)
+            for key, _ in mine:
+                self._pending_deletes.pop(key, None)  # 逾時的清掉
+            if recently_expired:
+                await safe_reply(self._messenger, message, replies.format_confirm_expired())
+            # 其他情況（根本沒有待確認）：什麼都不做，也不回覆，這可能只是一般聊天
+
+    async def _confirm_delete(self, message: IncomingMessage, key: str, pending: PendingDelete) -> None:
+        """兩種確認方式共用：待確認只能用一次；在鎖裡面再檢查一次擁有者與狀態；只把狀態標成「已刪除」。"""
+        self._pending_deletes.pop(key, None)
 
         def delete(store: TicketStore):
             record = store.get(pending.serial)
@@ -228,10 +259,13 @@ class MessageRouter:
             record, summary = await self._gateway.run_with_retries(delete)
         except StoreError:
             await safe_reply(self._messenger, message, replies.format_failure())
-            return True
+            return
         text = replies.format_not_found() if record is None else replies.format_deleted(record, summary)
         await safe_reply(self._messenger, message, text)
-        return True
+
+    @staticmethod
+    def _is_confirm_word(text: str) -> bool:
+        return unicodedata.normalize("NFKC", text).strip() in CONFIRM_WORDS  # 必須整則訊息剛好就是「確定」
 
     async def _handle_correction(self, message: IncomingMessage, serial: int) -> None:
         uid = message.author_id
